@@ -111,42 +111,54 @@ class DocumentProcessor(QObject):
     def _print_pdf(self, file_path, printer_name, paper_size, copies, duplex):
         """PDF belgesini yazdırır"""
         try:
-            # PyPDF2 ile PDF dosyasını aç
+            # PDF dosyasının varlığını kontrol et
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"PDF dosyası bulunamadı: {file_path}")
+            
+            # PyPDF2 ile PDF dosyasını aç ve sayfa sayısını kontrol et
             with open(file_path, 'rb') as pdf_file:
                 pdf_reader = PdfReader(pdf_file)
                 page_count = len(pdf_reader.pages)
+                print(f"PDF dosyası açıldı: {file_path}, {page_count} sayfa")
+            
+            # Alternatif yazdırma yöntemi kullan
+            # ShellExecute yerine doğrudan win32print kullan
+            try:
+                # Yazıcının varlığını kontrol et
+                printers = [p[2] for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
+                if printer_name not in printers:
+                    raise ValueError(f"Yazıcı bulunamadı: {printer_name}")
                 
                 # Yazıcı bağlantısını aç
-                printer_handle = win32print.OpenPrinter(printer_name)
-                
+                hPrinter = win32print.OpenPrinter(printer_name)
                 try:
-                    # Yazdırma işi oluştur
-                    print_job = win32print.StartDocPrinter(printer_handle, 1, (os.path.basename(file_path), None, "RAW"))
-                    
+                    # Yazdırma işi başlat
+                    hJob = win32print.StartDocPrinter(hPrinter, 1, (os.path.basename(file_path), None, "RAW"))
                     try:
-                        # Her kopya için yazdır
-                        for _ in range(copies):
-                            # Her sayfayı yazdır
-                            for page_num in range(page_count):
-                                # Sayfa başlat
-                                win32print.StartPagePrinter(printer_handle)
-                                
-                                # PDF sayfasını işle ve yazdır
-                                # Not: Burada basit bir bildirim yazdırıyoruz, gerçek PDF içeriğini
-                                # yazdırmak için daha gelişmiş bir PDF render kütüphanesi gerekebilir
-                                page_data = f"PDF Sayfa {page_num+1}/{page_count} yazdırılıyor...".encode('utf-8')
-                                win32print.WritePrinter(printer_handle, page_data)
-                                
-                                # Sayfayı bitir
-                                win32print.EndPagePrinter(printer_handle)
+                        # PDF dosyasını doğrudan yazdırmak için GhostScript veya başka bir PDF işleyici gerekebilir
+                        # Şimdilik dosyayı doğrudan yazıcıya göndermeyi deneyelim
+                        for i in range(copies):
+                            # Dosyayı oku
+                            with open(file_path, 'rb') as f:
+                                data = f.read()
+                                # Yazıcıya gönder
+                                win32print.StartPagePrinter(hPrinter)
+                                win32print.WritePrinter(hPrinter, data)
+                                win32print.EndPagePrinter(hPrinter)
+                        return True
                     finally:
-                        # Yazdırma işini bitir
-                        win32print.EndDocPrinter(printer_handle)
+                        win32print.EndDocPrinter(hPrinter)
                 finally:
-                    # Yazıcı bağlantısını kapat
-                    win32print.ClosePrinter(printer_handle)
-                
-                return True
+                    win32print.ClosePrinter(hPrinter)
+            except Exception as e:
+                print(f"PDF doğrudan yazdırma hatası: {e}")
+                # Doğrudan yazdırma başarısız olursa, alternatif yöntem olarak varsayılan yazdırma işlemini dene
+                print("Alternatif yazdırma yöntemi deneniyor...")
+                return self._print_generic_alternative(file_path, printer_name, copies)
+            
+        except FileNotFoundError as fnf:
+            print(f"PDF dosyası hatası: {fnf}")
+            return False
         except Exception as e:
             print(f"PDF yazdırma hatası: {e}")
             return False
@@ -212,6 +224,53 @@ class DocumentProcessor(QObject):
             print(f"Hata türü: {type(e).__name__}, Hata kodu: {getattr(e, 'winerror', 'Bilinmiyor')}")
             return False
     
+    def _print_generic_alternative(self, file_path, printer_name, copies=1):
+        """ShellExecute'e alternatif olarak belgeyi yazdırır"""
+        try:
+            # Dosyanın varlığını kontrol et
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Dosya bulunamadı: {file_path}")
+                
+            # Yazıcının varlığını kontrol et
+            printers = [p[2] for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
+            if printer_name not in printers:
+                raise ValueError(f"Yazıcı bulunamadı: {printer_name}")
+            
+            # Varsayılan yazıcıyı geçici olarak değiştir
+            current_printer = win32print.GetDefaultPrinter()
+            win32print.SetDefaultPrinter(printer_name)
+            
+            try:
+                # Alternatif yazdırma yöntemi: win32api.ShellExecute yerine subprocess kullan
+                import subprocess
+                for i in range(copies):
+                    try:
+                        # Yazdırma komutu oluştur
+                        print_cmd = f'rundll32.exe printui.dll,PrintUIEntry /k /n "{printer_name}" "{file_path}"'
+                        subprocess.run(print_cmd, shell=True, check=True)
+                    except subprocess.SubprocessError as print_error:
+                        print(f"Kopya {i+1} yazdırılırken hata: {print_error}")
+                        raise
+                
+                return True
+            finally:
+                # Varsayılan yazıcıyı geri al
+                try:
+                    win32print.SetDefaultPrinter(current_printer)
+                except Exception as reset_error:
+                    print(f"Varsayılan yazıcı geri alınırken hata: {reset_error}")
+                
+        except FileNotFoundError as fnf:
+            print(f"Dosya hatası: {fnf}")
+            return False
+        except ValueError as ve:
+            print(f"Yazıcı hatası: {ve}")
+            return False
+        except Exception as e:
+            print(f"Alternatif yazdırma hatası: {e}")
+            print(f"Hata türü: {type(e).__name__}, Hata kodu: {getattr(e, 'winerror', 'Bilinmiyor')}")
+            return False
+    
     def _add_to_history(self, file_path, printer_name, success, error_msg=None):
         """Yazdırma işlemini geçmişe ekler"""
         history_item = {
@@ -239,6 +298,53 @@ class DocumentProcessor(QObject):
         """Yazdırma geçmişini temizler"""
         self.print_history = []
         return True
+    
+    def _print_generic_alternative(self, file_path, printer_name, copies=1):
+        """ShellExecute'e alternatif olarak belgeyi yazdırır"""
+        try:
+            # Dosyanın varlığını kontrol et
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Dosya bulunamadı: {file_path}")
+                
+            # Yazıcının varlığını kontrol et
+            printers = [p[2] for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
+            if printer_name not in printers:
+                raise ValueError(f"Yazıcı bulunamadı: {printer_name}")
+            
+            # Varsayılan yazıcıyı geçici olarak değiştir
+            current_printer = win32print.GetDefaultPrinter()
+            win32print.SetDefaultPrinter(printer_name)
+            
+            try:
+                # Alternatif yazdırma yöntemi: win32api.ShellExecute yerine subprocess kullan
+                import subprocess
+                for i in range(copies):
+                    try:
+                        # Yazdırma komutu oluştur
+                        print_cmd = f'rundll32.exe printui.dll,PrintUIEntry /k /n "{printer_name}" "{file_path}"'
+                        subprocess.run(print_cmd, shell=True, check=True)
+                    except subprocess.SubprocessError as print_error:
+                        print(f"Kopya {i+1} yazdırılırken hata: {print_error}")
+                        raise
+                
+                return True
+            finally:
+                # Varsayılan yazıcıyı geri al
+                try:
+                    win32print.SetDefaultPrinter(current_printer)
+                except Exception as reset_error:
+                    print(f"Varsayılan yazıcı geri alınırken hata: {reset_error}")
+                
+        except FileNotFoundError as fnf:
+            print(f"Dosya hatası: {fnf}")
+            return False
+        except ValueError as ve:
+            print(f"Yazıcı hatası: {ve}")
+            return False
+        except Exception as e:
+            print(f"Alternatif yazdırma hatası: {e}")
+            print(f"Hata türü: {type(e).__name__}, Hata kodu: {getattr(e, 'winerror', 'Bilinmiyor')}")
+            return False
     
     def get_document_info(self, file_path):
         """Belge hakkında temel bilgileri döndürür"""
